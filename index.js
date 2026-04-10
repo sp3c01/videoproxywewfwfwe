@@ -56,7 +56,6 @@ app.get("/api/proxy-video", async (req, res) => {
     if (req.headers.range) headers["Range"] = req.headers.range;
     if (req.headers.referer) headers["Referer"] = req.headers.referer;
 
-    // Follow redirects manually with SSRF checks
     let currentUrl = targetUrl;
     let upstream = null;
 
@@ -84,7 +83,6 @@ app.get("/api/proxy-video", async (req, res) => {
       return res.status(502).json({ error: "No response from upstream" });
     }
 
-    // Set response headers
     res.status(upstream.status);
     res.set("Cache-Control", "public, max-age=86400");
 
@@ -96,7 +94,6 @@ app.get("/api/proxy-video", async (req, res) => {
     if (cr) res.set("Content-Range", cr);
     res.set("Accept-Ranges", upstream.headers.get("accept-ranges") || "bytes");
 
-    // Pipe the stream
     const { Readable } = require("stream");
     if (upstream.body) {
       Readable.fromWeb(upstream.body).pipe(res);
@@ -111,7 +108,6 @@ app.get("/api/proxy-video", async (req, res) => {
   }
 });
 
-// Health check
 app.get("/", (req, res) => res.json({ status: "ok" }));
 
 app.listen(PORT, () => console.log(`Proxy running on port ${PORT}`));
