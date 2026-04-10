@@ -1,6 +1,10 @@
 const express = require("express");
+const { Readable } = require("stream");
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+const MAX_CHUNK = 5 * 1024 * 1024; // 5MB forced chunk
+const FETCH_TIMEOUT = 30000; // 30s
 
 function isPrivateHost(hostname) {
   return (
@@ -28,23 +32,20 @@ app.use((req, res, next) => {
 
 app.get("/api/proxy-video", async (req, res) => {
   const targetUrl = req.query.url;
-
-  if (!targetUrl) {
-    return res.status(400).json({ error: "Missing ?url= parameter" });
-  }
-
-  if (!targetUrl.startsWith("http://")) {
-    return res.status(400).json({ error: "Only http:// URLs are proxied" });
-  }
+  if (!targetUrl) return res.status(400).json({ error: "Missing ?url=" });
+  if (!targetUrl.startsWith("http://"))
+    return res.status(400).json({ error: "Only http:// URLs" });
 
   try {
     const parsed = new URL(targetUrl);
-    if (isPrivateHost(parsed.hostname)) {
+    if (isPrivateHost(parsed.hostname))
       return res.status(403).json({ error: "Blocked: private IP" });
-    }
   } catch {
     return res.status(400).json({ error: "Invalid URL" });
   }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
 
   try {
     const headers = {
@@ -53,23 +54,34 @@ app.get("/api/proxy-video", async (req, res) => {
       Accept: "*/*",
     };
 
-    if (req.headers.range) headers["Range"] = req.headers.range;
+    // Forced chunking: inject Range if client didn't send one
+    const clientRange = req.headers.range;
+    if (clientRange) {
+      headers["Range"] = clientRange;
+    } else {
+      headers["Range"] = `bytes=0-${MAX_CHUNK - 1}`;
+    }
+
     if (req.headers.referer) headers["Referer"] = req.headers.referer;
 
     let currentUrl = targetUrl;
     let upstream = null;
 
     for (let i = 0; i < 5; i++) {
-      upstream = await fetch(currentUrl, { headers, redirect: "manual" });
+      upstream = await fetch(currentUrl, {
+        headers,
+        redirect: "manual",
+        signal: controller.signal,
+      });
 
       if (upstream.status >= 300 && upstream.status < 400) {
         const location = upstream.headers.get("location");
+        await upstream.body?.cancel();
         if (!location) break;
         const resolved = new URL(location, currentUrl).toString();
         try {
-          if (isPrivateHost(new URL(resolved).hostname)) {
+          if (isPrivateHost(new URL(resolved).hostname))
             return res.status(403).json({ error: "Blocked: redirect to private IP" });
-          }
         } catch {
           return res.status(400).json({ error: "Invalid redirect URL" });
         }
@@ -79,9 +91,9 @@ app.get("/api/proxy-video", async (req, res) => {
       break;
     }
 
-    if (!upstream) {
-      return res.status(502).json({ error: "No response from upstream" });
-    }
+    clearTimeout(timeout);
+
+    if (!upstream) return res.status(502).json({ error: "No response" });
 
     res.status(upstream.status);
     res.set("Cache-Control", "public, max-age=86400");
@@ -94,20 +106,24 @@ app.get("/api/proxy-video", async (req, res) => {
     if (cr) res.set("Content-Range", cr);
     res.set("Accept-Ranges", upstream.headers.get("accept-ranges") || "bytes");
 
-    const { Readable } = require("stream");
+    // Cleanup: cancel upstream when client disconnects
+    res.on("close", () => {
+      try { upstream.body?.cancel(); } catch {}
+    });
+
     if (upstream.body) {
-      Readable.fromWeb(upstream.body).pipe(res);
+      // Low highWaterMark = less RAM buffering
+      Readable.fromWeb(upstream.body, { highWaterMark: 65536 }).pipe(res);
     } else {
       res.end();
     }
   } catch (e) {
+    clearTimeout(timeout);
     console.error("proxy-video error:", e.message);
-    if (!res.headersSent) {
-      res.status(502).json({ error: "Proxy error" });
-    }
+    if (!res.headersSent) res.status(502).json({ error: "Proxy error" });
   }
 });
 
 app.get("/", (req, res) => res.json({ status: "ok" }));
 
-app.listen(PORT, () => console.log(`Proxy running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Proxy on port ${PORT}`));
