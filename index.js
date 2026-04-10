@@ -3,8 +3,8 @@ const { Readable } = require("stream");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const MAX_CHUNK = 5 * 1024 * 1024; // 5MB forced chunk
-const FETCH_TIMEOUT = 30000; // 30s
+const MAX_CHUNK = 5 * 1024 * 1024;
+const FETCH_TIMEOUT = 30000;
 
 function isPrivateHost(hostname) {
   return (
@@ -54,7 +54,6 @@ app.get("/api/proxy-video", async (req, res) => {
       Accept: "*/*",
     };
 
-    // Forced chunking: inject Range if client didn't send one
     const clientRange = req.headers.range;
     if (clientRange) {
       headers["Range"] = clientRange;
@@ -106,14 +105,18 @@ app.get("/api/proxy-video", async (req, res) => {
     if (cr) res.set("Content-Range", cr);
     res.set("Accept-Ranges", upstream.headers.get("accept-ranges") || "bytes");
 
-    // Cleanup: cancel upstream when client disconnects
-    res.on("close", () => {
-      try { upstream.body?.cancel(); } catch {}
-    });
-
     if (upstream.body) {
-      // Low highWaterMark = less RAM buffering
-      Readable.fromWeb(upstream.body, { highWaterMark: 65536 }).pipe(res);
+      const nodeStream = Readable.fromWeb(upstream.body, { highWaterMark: 65536 });
+
+      res.on("close", () => {
+        if (!nodeStream.destroyed) nodeStream.destroy();
+      });
+
+      nodeStream.on("error", () => {
+        if (!res.destroyed) res.end();
+      });
+
+      nodeStream.pipe(res);
     } else {
       res.end();
     }
