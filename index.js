@@ -26,7 +26,7 @@ app.use((req, res, next) => {
   next();
 });
 
-app.get("/proxy-video", async (req, res) => {
+app.get("/api/proxy-video", async (req, res) => {
   const targetUrl = req.query.url;
 
   if (!targetUrl) {
